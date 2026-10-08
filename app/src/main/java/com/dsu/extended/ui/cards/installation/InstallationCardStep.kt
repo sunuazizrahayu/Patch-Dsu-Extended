@@ -23,6 +23,7 @@ fun InstallationCardStep(
     onClickDiscardInstalledGsiAndInstall: () -> Unit,
     onClickDiscardDsu: () -> Unit,
     onClickRebootToDynOS: () -> Unit,
+    onClickRebootToSystem: () -> Unit,
     onClickOpenLogsTab: () -> Unit,
     onClickViewLogs: () -> Unit,
     onClickViewCommands: () -> Unit,
@@ -48,6 +49,8 @@ fun InstallationCardStep(
         InstallationStep.DSU_ALREADY_RUNNING_DYN_OS ->
             ProgressableCardContent(
                 text = stringResource(R.string.already_running_dsu),
+                textFirstButton = stringResource(id = R.string.reboot_to_system),
+                onClickFirstButton = onClickRebootToSystem,
             )
         InstallationStep.PROCESSING ->
             ProgressableCardContent(
@@ -220,6 +223,8 @@ fun InstallationCardStep(
         InstallationStep.ERROR_ALREADY_RUNNING_DYN_OS ->
             ProgressableCardContent(
                 text = stringResource(R.string.already_running_dsu),
+                textFirstButton = stringResource(id = R.string.reboot_to_system),
+                onClickFirstButton = onClickRebootToSystem,
                 textSecondButton = stringResource(id = R.string.mreturn),
                 onClickSecondButton = onClickClear,
                 showError = true,

@@ -104,6 +104,7 @@
     <string name="installation_finished_rootless">Image installed successfully, check your notifications to boot into dynamic system.</string>
     <string name="installation_finished">Installation finished.</string>
     <string name="reboot_into_dsu">Reboot into DSU</string>
+    <string name="reboot_to_system">Reboot to system</string>
     <string name="live_update_channel_name">Live installation updates</string>
     <string name="live_update_channel_description">Progress and state updates for DSU installation</string>
     <string name="live_update_notification_title">DSU install in progress</string>

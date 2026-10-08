@@ -72,6 +72,15 @@
             android:foregroundServiceType="dataSync" />
 
         <receiver
+            android:name=".service.RebootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.dsu.extended.action.SMART_REBOOT" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
             android:name=".widget.DsuWidgetReceiver"
             android:exported="true">
             <intent-filter>

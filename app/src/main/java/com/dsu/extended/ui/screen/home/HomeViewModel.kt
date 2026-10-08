@@ -24,6 +24,7 @@ import kotlinx.coroutines.withContext
 import com.dsu.extended.BuildConfig
 import com.dsu.extended.R
 import com.dsu.extended.core.BaseViewModel
+import com.dsu.extended.core.DsuRebootManager
 import com.dsu.extended.core.StorageManager
 import com.dsu.extended.installer.adb.AdbInstallationHandler
 import com.dsu.extended.installer.privileged.DsuInstallationHandler
@@ -470,12 +471,18 @@ class HomeViewModel @Inject constructor(
 
     fun onClickRebootToDynOS() {
         updateInstallationCard { it.copy(installationStep = InstallationStep.PROCESSING) }
-        publishDsuState(installed = true, running = true)
         viewModelScope.launch {
-            PrivilegedProvider.run {
-                setEnable(true, true)
-                Shell.cmd("reboot").exec()
-            }
+            // Guarded: DsuRebootManager falls back to a plain reboot
+            // (back to stock) when already running inside the DSU instead
+            // of re-arming oneShot and sticking in the DSU.
+            DsuRebootManager.rebootToDsu(application.applicationContext)
+        }
+    }
+
+    fun onClickRebootToSystem() {
+        updateInstallationCard { it.copy(installationStep = InstallationStep.PROCESSING) }
+        viewModelScope.launch {
+            DsuRebootManager.rebootToSystem(application.applicationContext)
         }
     }
 

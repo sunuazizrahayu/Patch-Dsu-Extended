@@ -13,6 +13,7 @@ import androidx.core.app.NotificationManagerCompat
 import com.dsu.extended.MainActivity
 import com.dsu.extended.R
 import com.dsu.extended.preparation.InstallationStep
+import com.dsu.extended.service.RebootReceiver
 
 class InstallationLiveUpdateNotifier(
     private val context: Context,
@@ -92,6 +93,16 @@ class InstallationLiveUpdateNotifier(
                 .setProgress(0, 0, false)
                 .setAutoCancel(true)
 
+        if (canRebootToDsu) {
+            // Smart reboot: system + DSU installed -> boot into DSU,
+            // already inside DSU -> plain reboot back to stock system.
+            builder.addAction(
+                R.drawable.app_icon_mono,
+                context.getString(R.string.reboot_into_dsu),
+                buildRebootIntent(),
+            )
+        }
+
         if (Build.VERSION.SDK_INT >= 36) {
             builder.setRequestPromotedOngoing(false)
         }
@@ -158,6 +169,18 @@ class InstallationLiveUpdateNotifier(
         return PendingIntent.getActivity(
             context,
             0,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
+
+    private fun buildRebootIntent(): PendingIntent {
+        // setPackage() makes the broadcast explicit so it is delivered
+        // to our manifest-declared receiver on Android 8+.
+        val intent = Intent(RebootReceiver.ACTION_SMART_REBOOT).setPackage(context.packageName)
+        return PendingIntent.getBroadcast(
+            context,
+            1,
             intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )

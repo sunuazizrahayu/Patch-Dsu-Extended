@@ -187,6 +187,7 @@ fun Home(
                     onClickDiscardInstalledGsiAndInstall = { homeViewModel.onClickDiscardGsiAndStartInstallation() },
                     onClickDiscardDsu = { homeViewModel.showDiscardSheet() },
                     onClickRebootToDynOS = { homeViewModel.onClickRebootToDynOS() },
+                    onClickRebootToSystem = { homeViewModel.onClickRebootToSystem() },
                     onClickOpenLogsTab = { navigate(Destinations.Logs) },
                     onClickViewLogs = { homeViewModel.showLogsWarning() },
                     onClickViewCommands = { navigate(Destinations.ADBInstallation) },
