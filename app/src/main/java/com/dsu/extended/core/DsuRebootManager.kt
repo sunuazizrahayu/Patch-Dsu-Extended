@@ -20,27 +20,62 @@ object DsuRebootManager {
     suspend fun rebootToDsu(context: Context): Boolean = withContext(Dispatchers.IO) {
         AppLogger.i(TAG, "Reboot to DSU requested from subsystem")
 
+        // Probe both sources so a wrong guard decision is visible in logs.
+        val propRunning = DevicePropUtils.isGsiRunning()
+        val serviceInUse = if (PrivilegedProvider.isConnected()) {
+            runCatching {
+                var result = false
+                PrivilegedProvider.run { result = isInUse }
+                result
+            }.getOrDefault(false)
+        } else {
+            false
+        }
+        AppLogger.i(TAG, "DSU state probe", "propRunning" to propRunning, "serviceInUse" to serviceInUse)
+
         // Guard: when already running inside the DSU, re-arming oneShot
         // (setEnable(true, true) / reboot("dsu") / gsi_tool enable -s) keeps
         // the device stuck in the DSU and looks like a mere soft reboot.
         // A plain reboot lets the oneShot expire and returns to stock.
-        if (isRunningInDsu()) {
+        if (propRunning || serviceInUse) {
             AppLogger.i(TAG, "Already running in DSU; falling back to plain reboot to stock")
             return@withContext rebootToSystem(context)
         }
 
+        // Re-arm oneShot via the privileged service when available.
+        // The setEnable() return value matters: rebooting with the "dsu"
+        // reason while the DSU is NOT enabled lands back on stock.
+        var enableOk = false
         if (PrivilegedProvider.isConnected()) {
-            val enabled = runCatching {
-                PrivilegedProvider.run {
-                    setEnable(true, true)
-                }
-                true
+            enableOk = runCatching {
+                var result = false
+                PrivilegedProvider.run { result = setEnable(true, true) }
+                result
             }.getOrDefault(false)
+            AppLogger.i(TAG, "Privileged setEnable finished", "enabled" to enableOk)
+        }
 
-            if (enabled) {
-                executeSystemReboot(context)
+        // Reboot only after the DSU is armed. Reference behavior
+        // (DSU-Sideloader): a plain full `reboot` after arming oneShot.
+        // PowerManager.reboot("dsu") is only a fallback: the app process
+        // usually lacks the REBOOT permission, and a silent fallback to a
+        // plain reboot would boot stock instead of the DSU.
+        if (enableOk) {
+            if (shellReboot()) {
                 return@withContext true
             }
+            AppLogger.w(TAG, "Shell reboot failed; trying PowerManager dsu reboot")
+            val dsuRebootOk = runCatching {
+                val pm = context.getSystemService(PowerManager::class.java)
+                    ?: throw IllegalStateException("PowerManager unavailable")
+                pm.reboot("dsu")
+                true
+            }.getOrDefault(false)
+            AppLogger.i(TAG, "Reboot with dsu reason finished", "ok" to dsuRebootOk)
+            if (dsuRebootOk) {
+                return@withContext true
+            }
+            AppLogger.w(TAG, "DSU armed but dsu reboot failed; trying mode fallback, never plain reboot")
         }
 
         val mode = OperationModeUtils.getOperationMode(
@@ -55,6 +90,7 @@ object DsuRebootManager {
             OperationMode.SYSTEM_AND_ROOT,
             OperationMode.ROOT -> {
                 val res = Shell.cmd("gsi_tool enable -s && (svc power reboot || reboot)").exec()
+                AppLogger.i(TAG, "Root re-arm reboot finished", "success" to res.isSuccess, "err" to res.err.take(200))
                 res.isSuccess
             }
 
@@ -98,14 +134,21 @@ object DsuRebootManager {
     }
 
     /**
-     * Plain reboot without re-arming the DSU. On a oneShot (single-boot)
-     * installation this returns the device to the stock system image,
-     * which is exactly what a user inside the DSU expects from "reboot".
+     * Return to the stock system image. Mirrors the AOSP pattern
+     * (DynamicSystemInstallationService.executeRebootToNormalCommand):
+     * explicitly disable the DSU first, then plain reboot. The explicit
+     * disable covers sticky installs too, not just expired oneShots.
      */
     suspend fun rebootToSystem(context: Context): Boolean = withContext(Dispatchers.IO) {
-        AppLogger.i(TAG, "Reboot to system requested (plain reboot, DSU not re-armed)")
+        AppLogger.i(TAG, "Reboot to system requested (disable DSU, then plain reboot)")
 
         if (PrivilegedProvider.isConnected()) {
+            val disabled = runCatching {
+                var result = false
+                PrivilegedProvider.run { result = setEnable(false, false) }
+                result
+            }.getOrDefault(false)
+            AppLogger.i(TAG, "Privileged setEnable(false) finished", "disabled" to disabled)
             executePlainReboot(context)
             return@withContext true
         }
@@ -161,39 +204,29 @@ object DsuRebootManager {
         }
     }
 
-    /** Best-effort check whether we are currently running inside the DSU. */
-    private suspend fun isRunningInDsu(): Boolean {
-        if (DevicePropUtils.isGsiRunning()) {
-            return true
-        }
-        if (PrivilegedProvider.isConnected()) {
-            val inUse = runCatching {
-                var result = false
-                PrivilegedProvider.run { result = isInUse }
-                result
-            }.getOrDefault(false)
-            if (inUse) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private fun executeSystemReboot(context: Context) {
-        runCatching {
-            val pm = context.getSystemService(PowerManager::class.java)
-            pm?.reboot("dsu")
-        }.onFailure {
-            Shell.cmd("svc power reboot || reboot").exec()
-        }
+    /**
+     * Plain `reboot` via shell (reference behavior). The command may not
+     * report success even when the reboot was accepted, callers treat a
+     * "device is going down" as best-effort.
+     */
+    private fun shellReboot(): Boolean {
+        return runCatching {
+            val res = Shell.cmd("reboot").exec()
+            AppLogger.i(TAG, "Shell reboot finished", "success" to res.isSuccess, "err" to res.err.take(200))
+            res.isSuccess
+        }.getOrDefault(false)
     }
 
     private fun executePlainReboot(context: Context) {
+        if (shellReboot()) {
+            return
+        }
         runCatching {
             val pm = context.getSystemService(PowerManager::class.java)
-            pm?.reboot(null)
+                ?: throw IllegalStateException("PowerManager unavailable")
+            pm.reboot(null)
         }.onFailure {
-            Shell.cmd("svc power reboot || reboot").exec()
+            AppLogger.w(TAG, "Plain reboot via PowerManager failed", "error" to (it.message ?: "unknown"))
         }
     }
 }
