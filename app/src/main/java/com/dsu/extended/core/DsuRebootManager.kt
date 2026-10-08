@@ -134,21 +134,34 @@ object DsuRebootManager {
     }
 
     /**
-     * Return to the stock system image. Mirrors the AOSP pattern
-     * (DynamicSystemInstallationService.executeRebootToNormalCommand):
-     * explicitly disable the DSU first, then plain reboot. The explicit
-     * disable covers sticky installs too, not just expired oneShots.
+     * Return to the stock system image.
+     *
+     * Only disables the DSU when it is still enabled (sticky installs).
+     * When it is already disabled (consumed oneShot), the enable state is
+     * left untouched and a plain reboot follows: on some devices calling
+     * setEnable(false) while running corrupts the next boot target and the
+     * reboot loops back into the DSU instead of stock.
      */
     suspend fun rebootToSystem(context: Context): Boolean = withContext(Dispatchers.IO) {
-        AppLogger.i(TAG, "Reboot to system requested (disable DSU, then plain reboot)")
+        AppLogger.i(TAG, "Reboot to system requested")
 
         if (PrivilegedProvider.isConnected()) {
-            val disabled = runCatching {
-                var result = false
-                PrivilegedProvider.run { result = setEnable(false, false) }
-                result
-            }.getOrDefault(false)
-            AppLogger.i(TAG, "Privileged setEnable(false) finished", "disabled" to disabled)
+            val needsDisable = runCatching {
+                var enabled = true
+                PrivilegedProvider.run { enabled = isEnabled }
+                enabled
+            }.getOrDefault(true)
+            AppLogger.i(TAG, "DSU enabled probe", "needsDisable" to needsDisable)
+            if (needsDisable) {
+                val disabled = runCatching {
+                    var result = false
+                    PrivilegedProvider.run { result = setEnable(false, false) }
+                    result
+                }.getOrDefault(false)
+                AppLogger.i(TAG, "Privileged setEnable(false) finished", "disabled" to disabled)
+            } else {
+                AppLogger.i(TAG, "DSU already disabled; plain reboot without touching enable state")
+            }
             executePlainReboot(context)
             return@withContext true
         }
