@@ -252,13 +252,18 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     // REQUIRES MANAGE_DYNAMIC_SYSTEM
     override fun remove(): Boolean {
-        if (!requiresDynamicSystem()) {
-            return false
-        }
         // Release any inspector-held mount/mapping first, or removal of a mapped image fails.
         synchronized(inspectorLock) { teardownInspectorMount() }
-        val result = DYNAMIC_SYSTEM!!.remove()
+        val dynamicResult = if (requiresDynamicSystem()) {
+            runCatching { DYNAMIC_SYSTEM!!.remove() }.getOrDefault(false)
+        } else {
+            false
+        }
         // Sweep leftover backing images the metadata-based removal missed so discard is complete.
+        // This gsiservice path is also what makes discard work for shell UID
+        // (Shizuku/Dhizuku), where the dynamic_system call above throws
+        // SecurityException due to missing MANAGE_DYNAMIC_SYSTEM.
+        var sweptAny = false
         runCatching {
             val gsi = requiresGsiService()
             getImagePrefixes().forEach { prefix ->
@@ -270,12 +275,20 @@ class PrivilegedService : IPrivilegedService.Stub() {
                                 imageService.unmapImageDevice(name)
                             }
                             imageService.deleteBackingImage(name)
+                            sweptAny = true
                         }
                     }
                 }
             }
         }
-        return result
+        if (dynamicResult) return true
+        // Rootless discard counts as success when no backing images remain.
+        return runCatching {
+            getImagePrefixes().all { prefix ->
+                runCatching { requiresGsiService().openImageService(prefix).allBackingImages.isEmpty() }
+                    .getOrDefault(true)
+            } && (sweptAny || !isGsiInstalledFallback())
+        }.getOrDefault(dynamicResult)
     }
 
     // REQUIRES MANAGE_DYNAMIC_SYSTEM
@@ -283,7 +296,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         if (!requiresDynamicSystem()) {
             return false
         }
-        return DYNAMIC_SYSTEM!!.setEnable(enable, oneShot)
+        return runCatching { DYNAMIC_SYSTEM!!.setEnable(enable, oneShot) }.getOrDefault(false)
     }
 
     // REQUIRES MANAGE_DYNAMIC_SYSTEM
@@ -340,16 +353,58 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun isInUse(): Boolean {
         if (!requiresDynamicSystem()) {
-            return false
+            return isGsiRunningFallback()
         }
-        return DYNAMIC_SYSTEM!!.isInUse
+        return try {
+            DYNAMIC_SYSTEM!!.isInUse
+        } catch (e: Exception) {
+            // Shell UID (Shizuku/Dhizuku) lacks MANAGE_DYNAMIC_SYSTEM, so the
+            // direct call throws SecurityException. Fall back to props/slots
+            // which shell *can* read, instead of reporting "not in use".
+            Log.w(BuildConfig.APPLICATION_ID, "isInUse via dynamic_system failed, using fallback", e)
+            isGsiRunningFallback()
+        }
     }
 
     override fun isInstalled(): Boolean {
         if (!requiresDynamicSystem()) {
-            return false
+            return isGsiInstalledFallback()
         }
-        return DYNAMIC_SYSTEM!!.isInstalled
+        return try {
+            DYNAMIC_SYSTEM!!.isInstalled
+        } catch (e: Exception) {
+            Log.w(BuildConfig.APPLICATION_ID, "isInstalled via dynamic_system failed, using fallback", e)
+            isGsiInstalledFallback()
+        }
+    }
+
+    /**
+     * Rootless-compatible DSU state detection. Runs inside the privileged
+     * process (uid 0 or shell 2000), both of which can read gsid props and
+     * talk to gsiservice, while the untrusted app process often cannot
+     * (SELinux denial on gsid_prop).
+     */
+    private fun isGsiRunningFallback(): Boolean {
+        if (runCatching { SystemProperties.get("ro.gsid.image_running") }.getOrDefault("") == "1") {
+            return true
+        }
+        return runCatching { requiresGsiService().activeDsuSlot?.isNotEmpty() == true }.getOrDefault(false)
+    }
+
+    private fun isGsiInstalledFallback(): Boolean {
+        if (isGsiRunningFallback()) return true
+        if (runCatching { SystemProperties.get("gsid.image_installed") }.getOrDefault("") == "1") {
+            return true
+        }
+        // Any installed slot or any backing image means a DSU exists.
+        val hasSlot = runCatching { requiresGsiService().installedDsuSlots.isNotEmpty() }.getOrDefault(false)
+        if (hasSlot) return true
+        return runCatching {
+            getImagePrefixes().any { prefix ->
+                runCatching { requiresGsiService().openImageService(prefix).allBackingImages.isNotEmpty() }
+                    .getOrDefault(false)
+            }
+        }.getOrDefault(false)
     }
 
     private var GSI_SERVICE: IGsiService? = null

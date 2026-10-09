@@ -76,6 +76,15 @@ class PartitionsViewModel @Inject constructor(
 
     init {
         refresh()
+        // The privileged service binds asynchronously (Shizuku permission
+        // grant / root grant can happen after this screen is created).
+        // Re-list as soon as the operation mode changes so a granted
+        // Shizuku session populates the list without manual retry.
+        viewModelScope.launch {
+            session.operationMode.collect {
+                refresh()
+            }
+        }
     }
 
     fun refresh() {
@@ -305,9 +314,14 @@ class PartitionsViewModel @Inject constructor(
     }
 
     private fun isPrivileged(): Boolean {
+        // Listing backing images goes through gsiservice (IImageService),
+        // which the shell UID (Shizuku/Dhizuku) can also reach. Only ADB
+        // mode has no bound privileged service at all. Gating on ROOT-only
+        // here left the list empty for Shizuku users even with a DSU installed.
         return when (session.getOperationMode()) {
-            OperationMode.ROOT, OperationMode.SYSTEM, OperationMode.SYSTEM_AND_ROOT -> true
-            else -> false
+            OperationMode.ROOT, OperationMode.SYSTEM, OperationMode.SYSTEM_AND_ROOT,
+            OperationMode.SHIZUKU, OperationMode.DHIZUKU -> true
+            else -> PrivilegedProvider.isConnected()
         }
     }
 

@@ -152,6 +152,23 @@ class HomeViewModel @Inject constructor(
         }
         publishDsuState(installed = propInstalled, running = propRunning)
 
+        refreshDsuState()
+        // Re-probe when the privileged mode changes (e.g. user grants root/
+        // Shizuku after this ViewModel was created). Without this the install
+        // card stays on NOT_INSTALLING even though a DSU is installed.
+        viewModelScope.launch {
+            session.operationMode.collect {
+                refreshDsuState()
+            }
+        }
+    }
+
+    /**
+     * Best-effort DSU presence probe. Safe to call repeatedly: it only
+     * upgrades the card to DSU_ALREADY_* states, never downgrades an active
+     * install/error/success state.
+     */
+    fun refreshDsuState() {
         viewModelScope.launch {
             // Never let a binder/service failure kill startup: worst case the
             // card keeps the best-effort prop state set above (e.g. ADB mode).
@@ -163,11 +180,26 @@ class HomeViewModel @Inject constructor(
                         return@run
                     }
                     if (isInstalled) {
-                        updateInstallationCard { it.copy(installationStep = InstallationStep.DSU_ALREADY_INSTALLED) }
+                        val currentStep = _uiState.value.installationCard.installationStep
+                        if (currentStep == InstallationStep.NOT_INSTALLING) {
+                            updateInstallationCard { it.copy(installationStep = InstallationStep.DSU_ALREADY_INSTALLED) }
+                        }
                         publishDsuState(installed = true, running = false)
                         return@run
                     }
-                    publishDsuState(installed = false, running = false)
+                    // Only clear to "not installed" when the card is in a
+                    // pristine or already-installed state; never clobber an
+                    // in-progress install, error, or success presentation.
+                    val currentStep = _uiState.value.installationCard.installationStep
+                    if (currentStep == InstallationStep.NOT_INSTALLING ||
+                        currentStep == InstallationStep.DSU_ALREADY_INSTALLED ||
+                        currentStep == InstallationStep.DSU_ALREADY_RUNNING_DYN_OS
+                    ) {
+                        if (currentStep != InstallationStep.NOT_INSTALLING) {
+                            updateInstallationCard { it.copy(installationStep = InstallationStep.NOT_INSTALLING) }
+                        }
+                        publishDsuState(installed = false, running = false)
+                    }
                 }
             }.onFailure {
                 AppLogger.w(tag, "Privileged DSU state probe failed, keeping prop state", "error" to (it.message ?: "unknown"))
@@ -478,9 +510,20 @@ class HomeViewModel @Inject constructor(
         updateInstallationCard { it.copy(installationStep = InstallationStep.PROCESSING) }
         publishDsuState(installed = true, running = true)
         viewModelScope.launch {
-            PrivilegedProvider.run {
-                setEnable(true, true)
-                Shell.cmd("reboot").exec()
+            val ok = runCatching {
+                PrivilegedProvider.run {
+                    setEnable(true, true)
+                    Shell.cmd("reboot").exec()
+                }
+                true
+            }.getOrDefault(false)
+            if (!ok) {
+                // Rootless (shell UID) cannot setEnable without
+                // MANAGE_DYNAMIC_SYSTEM: don't leave the card stuck on
+                // PROCESSING, fall back to the installed state.
+                AppLogger.w(tag, "Reboot to DSU failed, restoring installed state")
+                updateInstallationCard { it.copy(installationStep = InstallationStep.DSU_ALREADY_INSTALLED) }
+                publishDsuState(installed = true, running = false)
             }
         }
     }
